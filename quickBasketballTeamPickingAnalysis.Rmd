@@ -1,0 +1,205 @@
+# Monte Carlo Analysis of a Pick-up Basketball Game
+
+I play once a week in a pick-up four-on-four basketball league.  In order to pick teams, we've shoot freethrows, assigning the first four players to make a basket to the first team, the second four to the second team, and then the remaining players are automatically on the team that plays the winner of the first game.  The winner of each round plays the players who are sitting out, with some special rules to create the new team depending on if there are more or less than four players sitting out.  
+
+I am thinking that this isn't a fair process; it creates a stronger first team than second team, and the weakest players will end up on the third team (usually including myself).  The first team seems to end up with a runs of wins, reducing the amount of time that the players on the other two teams get to play.  The alternative I want to propose is choosing teams by assigning the players who are successful in the freethrow line to alternating between the first and second teams.  This won't solve the problem of the third team having the weakest players, so as a control, I'll simulate choosing teams completely at random.
+
+A disclaimer before I begin:  I really have no idea how play basketball, and nothing in this simulation is specific to basketball.  I'm distilling a lot of things down to a Bernoulli / binomial trial of some kind.  I'm going to assume that player's skill at shooting freethrows is equivalent to their overall skill at basketball, and that the average of the four player's skill is equivalent to their team's skill.
+
+```{r libraries-to-use}
+require(plyr)
+require(ggplot2)
+```
+
+I'm going to generate a distribution of player's skill from a beta distribution.  I wanted something that was somewhat normally distributed, but bound between 0 and 1 so I can use it for the bernouli trials.  I wanted something with a median value around 0.6, from a quick google search of average freethrowing ability in the NBA.  We're likely not NBA quality players, but we play on an elementary school court, so maybe this is a good enough estimate.  I've played around with adjusting the distribution, and it doesn't seem to make much of a difference in the results.  I've also played around with the number of players, but we'll keep it at 12 for now to keep the analysis simple.
+
+```{r player-distribution}
+# this function will generate a pool of players
+generatePlayers <- function(nPlayers) {
+    return(data.frame(PLAYER.ID=sprintf("P%d", 1:nPlayers), 
+                      PLAYER.METRIC=qbeta(runif(nPlayers),2,4,6)))
+}
+
+q = seq(0.001,0.999,0.001)
+sampleDist = dbeta(q, 2, 3, 3)
+ggplot(data.frame(Q=q, DBETA=sampleDist)) + geom_line(aes(x=Q, y=DBETA))
+players = generatePlayers(12)
+players
+```
+
+Here's a function I'll use to take the player metric (our measurement of their skill) and turn it into a result from a test by samping a uniform distribution from 0 to 1 and comparing against their skill.  A higher player metric means a higher likelihood of success.
+```{r freethrow-function}
+freethrow <- function(pm){
+    # one sample from uniform dist less than player metric
+    return(runif(1) < pm)
+}
+
+```
+
+First, I'll create a function to test the current method of picking teams.  It takes a dataframe such as those output by `generatePlayers` to pick teams from.  I've added a second parameter called `initialFunction` to let me define the order the players get in line.  I'll use this later to test some variations, but for now, I'll make it default to keeping the order of the `players` dataframe.  One thing I forgot in my initial test of this code was the lines to move the players from the front queue to the end after they've failed the freethrow step.  The result was the order of players always coming out the same.
+
+```{r team-assignment-first-four-method}
+resequencePlayersOriginalOrder <- function(players){
+    return(players)
+}
+
+initializeTeamsFirstFour <- function(players, initialFunction=resequencePlayersOriginalOrder){
+    teamSize = 4
+    team1 = data.frame()
+    team2 = data.frame()
+    # reorder players into queue to shoot freethrows from.
+    playerSequence = initialFunction(players)
+    # conduct free throw trials as long as both teams not yet full.
+    while(nrow(team1) < teamSize | nrow(team2) < teamSize){
+      player = playerSequence[1,]
+      restOfThePlayers = playerSequence[2:nrow(playerSequence),]
+      result = freethrow(player$PLAYER.METRIC)
+      #print(sprintf("Player %s: %s", player$PLAYER.ID, result))
+      if(result){
+          # success, assign player to team
+          if(nrow(team1) < teamSize){
+              team1 = rbind(team1, playerSequence[1,])
+          } else {
+              team2 = rbind(team2, playerSequence[1,])
+          }
+          # Drop player from the shooting sequence
+          playerSequence = restOfThePlayers
+      } else {
+          # move player to back of the sequence:
+          playerSequence = rbind(restOfThePlayers, player)
+      }
+  }
+  # create a column for team number
+  team1$TEAM = 1
+  team2$TEAM = 2
+  # rest of players are 'team 3'
+  playerSequence$TEAM = 3
+  return(rbind(team1,team2, playerSequence))
+}
+```
+
+For the second method, I'll copy the 'first-four' method and change a few lines of code.  I'm sure there is a good way to move this to an external function that returns as a team ID number given the two sets of teams as input, but for now, this will work.
+
+``` {r team-assignment-other-methods}
+initializeTeamsEveryOther <- function(players, initialFunction=resequencePlayersOriginalOrder){
+    teamSize = 4
+    team1 = data.frame()
+    team2 = data.frame()
+    # sample players for freethrow order
+    playerSequence = initialFunction(players)
+    # conduct free throw trials
+    while(nrow(team1) < teamSize | nrow(team2) < teamSize){
+      player = playerSequence[1,]
+      restOfThePlayers = playerSequence[2:nrow(playerSequence),]
+      result = freethrow(player$PLAYER.METRIC)
+      #print(sprintf("Player %s: %s", player$PLAYER.ID, result))
+      if(result){
+        if(nrow(team1) == nrow(team2)){
+                team1 = rbind(team1, playerSequence[1,])
+            } else {
+                team2 = rbind(team2, playerSequence[1,])
+            }
+            # Drop player from the shooting sequence
+            playerSequence = playerSequence[2:nrow(playerSequence),]
+      } else {
+        # move player to back of the sequence:
+        playerSequence = rbind(restOfThePlayers, player)
+      }
+    }
+    team1$TEAM = 1
+    team2$TEAM = 2
+    playerSequence$TEAM = 3
+    return(rbind(team1,team2, playerSequence))
+}
+
+initializeTeamsByInitialOrder <- function(players, initialFunction=resequencePlayersOriginalOrder){
+    # this method could be done faster since no tests are involved, so the while loop isn't necessary
+    # e.g. playerSequence$TEAMS = c(rep(1,4), rep(2,4), rep(3,nrow(playerSequence)-8))
+    teamSize = 4
+    team1 = data.frame()
+    team2 = data.frame()
+    # sample players for freethrow order
+    playerSequence = initialFunction(players)
+    # conduct free throw trials
+    while(nrow(team1) < teamSize | nrow(team2) < teamSize){
+      player = playerSequence[1,]
+      restOfThePlayers = playerSequence[2:nrow(playerSequence),]
+      if(nrow(team1) < teamSize){
+        team1 = rbind(team1, playerSequence[1,])
+      } else {
+        team2 = rbind(team2, playerSequence[1,])
+      }
+      # Drop player from the shooting sequence
+      playerSequence = playerSequence[2:nrow(playerSequence),]
+    }
+    team1$TEAM = 1
+    team2$TEAM = 2
+    playerSequence$TEAM = 3
+    return(rbind(team1,team2, playerSequence))
+}
+```
+
+Let's make sure these are working.  This test didn't catch the issue with rotating the queue for a failed freethrow, but it did help me check that the format matched what I wanted.  I'll spit out a team metric compute from each by subsetting the results by team and computing an average of the player metrics.
+
+```{r test-initial-team-method-first-four}
+teams = initializeTeamsFirstFour(players, resequencePlayersOriginalOrder)  
+teams
+ddply(teams, .(TEAM), summarize, TEAM.METRIC = mean(PLAYER.METRIC))
+```
+
+```{r test-initial-team-method-every-other}
+teams = initializeTeamsEveryOther(players, resequencePlayersOriginalOrder)
+teams
+ddply(teams, .(TEAM), summarize, TEAM.METRIC = mean(PLAYER.METRIC))
+```
+
+I'll define a few other methods in order to resequence the players in the freethrow queue.  I discovered the bug with moving the failed player from the front of the queue to the back because these were consistently showing the same results between the two methods.  No one would ever suggest we track a player metric and sort our initial queue from worst-to-best, but that doesn't stop me (terrible at shooting freethrows) from trying to hop in line as soon as possible to get a better shot.
+
+```{r initial-lineup-other-methods}
+resequencePlayersRandom <- function(players){
+    return(players[sample(1:nrow(players), nrow(players), replace=FALSE),])
+}
+
+resequencePlayersBestFirst <- function(players){
+    return(players[order(players$PLAYER.METRIC,decreasing=TRUE),])
+}
+
+resequencePlayersWorstFirst <- function(players){
+    return(players[order(players$PLAYER.METRIC,decreasing=FALSE),])
+}
+```
+
+The basic monte carlo simulation I'm going to run is to compare the two methods of picking teams, along with a control simulation of assigning teams in blocks of four without any statistical test.  This control method should result in no difference between the team's skill, and give us a way of seeing how big the impact of our freethrow methods are.
+
+I'm making a few assumptions while setting up this monte carlo simulation:
+- The pool of players is from the distribution defined above, and infinitely deep.  In reality, our pick-up games have twenty to thirty players, of which anywhere from less than eight (not an ideal situation) to 16 or more will show up.
+- The number of players is always 12 - this makes the statistics for Team 3, the one that plays the winner of the first game, easier to make calculate.
+
+I'll use the plyr package to loop through my monte carlo simulation.  It's maybe not the most efficient way, but I like the progress bar it lets me use.
+
+```{r initialization-monte-carlo}
+nTrials = 10000 # seems to work fine on a 2011 MacBook Air 1.8 Ghz i5 / 4 gigs of RAM running Fedora 26.
+manyTrials = ldply(seq(1,nTrials), function(trailNumber){
+    players = generatePlayers(10)
+    playerSequence = resequencePlayersOriginalOrder(players)
+    firstFourTeams = initializeTeamsFirstFour(playerSequence, resequencePlayersOriginalOrder)
+    firstFourTeams$METHOD = "First Four"
+    everyOtherTeams = initializeTeamsEveryOther(playerSequence, resequencePlayersOriginalOrder)
+    everyOtherTeams$METHOD = "Every Other"
+    initialOrderTeams = initializeTeamsByInitialOrder(players, resequencePlayersOriginalOrder)
+    initialOrderTeams$METHOD = "Initial Order"
+    teams = rbind(firstFourTeams, everyOtherTeams, initialOrderTeams)
+    teams$TRIAL = trailNumber
+    return(teams)
+}, .progress="text")
+```
+
+```{r analysis-of-results}
+trialTeams = ddply(manyTeams, .(TEAM, TRIAL, METHOD), summarize, TEAM.METRIC=mean(PLAYER.METRIC))
+ddply(trialTeams, .(TEAM, METHOD), summarize, 
+      MEAN.TEAM.METRIC = mean(TEAM.METRIC),
+      SD.TEAM.METRIC = sd(TEAM.METRIC))
+
+require(ggplot2)
+ggplot(trialTeams) + geom_density(aes(x=TEAM.METRIC, group=METHOD, color=METHOD), position="dodge") + facet_wrap(~TEAM, nrow=3)
+```
